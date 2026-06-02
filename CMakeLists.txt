@@ -9,7 +9,6 @@ message(STATUS "CMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}")
 
 # 使用 Homebrew 安装的 libosip / libexosip
 if(APPLE)
-    # 自动检测 Homebrew 前缀
     execute_process(
         COMMAND brew --prefix
         OUTPUT_VARIABLE HOMEBREW_PREFIX
@@ -45,6 +44,8 @@ add_executable(BXC_SipServer
         Utils/MD5.c
         Utils/HTTPDigest.c
         SipServer.cpp
+        RtpReceiver.cpp
+        HttpServer.cpp
         main.cpp
         )
 TARGET_LINK_LIBRARIES(BXC_SipServer osip2 osipparser2 eXosip2)
