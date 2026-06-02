@@ -493,15 +493,19 @@ int SipServer::request_invite(const std::string &device, const std::string &sdpP
              "c=IN IP4 %s\r\n"
              "t=0 0\r\n"
              "m=video %s RTP/AVP 96 98 97\r\n"
-             "a=rtcp:%s\r\n"
+             "a=rtcp:%s IN IP4 %s\r\n"
+             "a=rtcp-mux\r\n"
              "a=recvonly\r\n"
              "a=rtpmap:96 PS/90000\r\n"
              "a=rtpmap:98 H264/90000\r\n"
              "a=rtpmap:97 MPEG4/90000\r\n"
+             "a=fmtp:96 profile-level-id=42001f;packetization-mode=1\r\n"
+             "a=rtcp-fb:* nack pli\r\n"
+             "a=rtcp-fb:* ccm fir\r\n"
              "y=0100000001\r\n"
-             "f=\r\n",
+             "f=v/0/0/0/0/0a/0/0/0\r\n",
              mInfo->getSipId(), mInfo->getIp().c_str(), mInfo->getIp().c_str(),
-             sdpPort.c_str(), sdpRtcpPort.c_str());
+             sdpPort.c_str(), sdpRtcpPort.c_str(), mInfo->getIp().c_str());
 
     int ret = eXosip_call_build_initial_invite(mSipCtx, &msg, to, from, nullptr, nullptr);
     if (ret) {
