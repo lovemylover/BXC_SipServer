@@ -9,16 +9,19 @@ extern "C" {
 #include <eXosip2/eXosip.h>
 }
 #include <map>
+#include <deque>
 #include <string>
+#include <atomic>
+#include <chrono>
 
 class ServerInfo {
 public:
     ServerInfo(const char *ua,const char *nonce, const char *ip, int port, int rtpPort,
                         const char *sipId, const char *sipRealm, const char *sipPass, int sipTimeout, int sipExpiry):
                         mUa(ua),
-                        mNonce(nonce),mIp(ip),mPort(port),mRtpPort(rtpPort),mSipId(sipId),
+                        mNonce(nonce),mIp(ip),mPort(port),mSipId(sipId),
                         mSipRealm(sipRealm),mSipPass(sipPass),mSipTimeout(sipTimeout),
-                        mSipExpiry(sipExpiry){}
+                        mSipExpiry(sipExpiry),mRtpPort(rtpPort){}
     ~ServerInfo() = default;
 public:
     const char *getUa() const{
@@ -71,9 +74,9 @@ public:
     Client(const char *ip, int port, const char *device) :
             mIp(ip),
             mPort(port),
-            mRtpPort(0),
             mDevice(device),
-            mIsReg(false){
+            mIsReg(false),
+            mRtpPort(0){
 
     }
     ~Client() = default;
@@ -126,16 +129,31 @@ private:
     void response_invite_ack(eXosip_event_t *evtp);
     int request_bye(eXosip_event_t* evtp);// 通知相机停止推流
     int request_invite(const char *device,const char *userIp,int userPort);
+    int request_record_info(const char *device, const char *userIp, int userPort,
+                            const char *startTime, const char *endTime);
     int parse_xml(const char* data, const char* s_mark, bool with_s_make, const char* e_mark, bool with_e_make, char* dest);
     void dump_request(eXosip_event_t *evtp);
     void dump_response(eXosip_event_t *evtp);
+    void enqueue_record_query(const char *device, const char *userIp, int userPort);
+    void process_pending_record_queries();
+    std::string build_record_query_time(bool startOfDay) const;
+    int next_sn();
+
+    struct PendingRecordQuery {
+        std::string device;
+        std::string ip;
+        int port;
+        std::chrono::steady_clock::time_point executeAt;
+    };
 
 private:
     bool mQuit;
     struct eXosip_t *mSipCtx;
     ServerInfo *mInfo;
+    std::atomic<int> mSn{1};
 
     std::map<std::string, Client *> mClientMap;// <DeviceID,SipClient>
+    std::deque<PendingRecordQuery> mPendingRecordQueries;
     int clearClientMap();
     Client * getClientByDevice(const char * device);
 };

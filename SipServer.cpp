@@ -14,6 +14,8 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #include <cstring>
+#include <cstdio>
+#include <ctime>
 #include "Utils/Log.h"
 
 extern "C"{
@@ -146,6 +148,7 @@ void SipServer::loop() {
         return;
     }
     while(!mQuit) {
+        this->process_pending_record_queries();
         eXosip_event_t *evtp = eXosip_event_wait(mSipCtx, 0, 20);
         if (!evtp){
             eXosip_automatic_action(mSipCtx);
@@ -228,7 +231,15 @@ void SipServer::response_register(eXosip_event_t *evtp) {
             this->response_message_answer(evtp,200);
             LOGI("Camera registration succee,ip=%s,port=%d,device=%s",client->getIp(),client->getPort(),client->getDevice());
 
-            mClientMap.insert(std::make_pair(client->getDevice(),client));
+            auto it = mClientMap.find(client->getDevice());
+            if (it != mClientMap.end()) {
+                delete it->second;
+                it->second = client;
+            } else {
+                mClientMap.insert(std::make_pair(client->getDevice(),client));
+            }
+
+            this->enqueue_record_query(client->getDevice(), client->getIp(), client->getPort());
 
             this->request_invite(client->getDevice(),client->getIp(),client->getPort());
 
@@ -302,6 +313,15 @@ void SipServer::response_message(eXosip_event_t *evtp) {
         this->response_message_answer(evtp,200);
         // 需要根据对方的Catelog请求，做一些相应的应答请求
     }
+    else if(!strcmp(CmdType, "RecordInfo")){
+        char SumNum[32] = {0};
+        parse_xml(body ? body->body : nullptr, "<SumNum>", false, "</SumNum>", false, SumNum);
+        this->response_message_answer(evtp,200);
+        LOGI("RecordInfo response: device=%s, sumNum=%s", DeviceID, SumNum);
+        if (body && body->body) {
+            LOGI("RecordInfo body:\n%s", body->body);
+        }
+    }
     else if(!strcmp(CmdType, "Keepalive")){
         this->response_message_answer(evtp,200);
     }else{
@@ -336,14 +356,11 @@ int SipServer::request_invite(const char *device, const char *userIp, int userPo
     osip_message_t *msg = nullptr;
     char from[1024] = {0};
     char to[1024] = {0};
-    char contact[1024] = {0};
     char sdp[2048] = {0};
-    char head[1024] = {0};
 
 
-    sprintf(from, "sip:%s@%s:%d", mInfo->getSipId(),mInfo->getIp(), mInfo->getPort());
-    sprintf(contact, "sip:%s@%s:%d", mInfo->getSipId(),mInfo->getIp(), mInfo->getPort());
-    sprintf(to, "sip:%s@%s:%d", device, userIp, userPort);
+    snprintf(from, sizeof(from), "sip:%s@%s:%d", mInfo->getSipId(),mInfo->getIp(), mInfo->getPort());
+    snprintf(to, sizeof(to), "sip:%s@%s:%d", device, userIp, userPort);
     snprintf (sdp, 2048,
               "v=0\r\n"
               "o=%s 0 0 IN IP4 %s\r\n"
@@ -382,6 +399,116 @@ int SipServer::request_invite(const char *device, const char *userIp, int userPo
     return ret;
 }
 
+int SipServer::request_record_info(const char *device, const char *userIp, int userPort,
+                                   const char *startTime, const char *endTime) {
+    if (device == nullptr || userIp == nullptr || startTime == nullptr || endTime == nullptr) {
+        LOGE("request_record_info invalid args");
+        return -1;
+    }
+
+    osip_message_t *msg = nullptr;
+    char from[1024] = {0};
+    char to[1024] = {0};
+    char xml[2048] = {0};
+
+    snprintf(from, sizeof(from), "sip:%s@%s:%d", mInfo->getSipId(), mInfo->getIp(), mInfo->getPort());
+    snprintf(to, sizeof(to), "sip:%s@%s:%d", device, userIp, userPort);
+    snprintf(xml, sizeof(xml),
+             "<?xml version=\"1.0\"?>\r\n"
+             "<Query>\r\n"
+             "<CmdType>RecordInfo</CmdType>\r\n"
+             "<SN>%d</SN>\r\n"
+             "<DeviceID>%s</DeviceID>\r\n"
+             "<StartTime>%s</StartTime>\r\n"
+             "<EndTime>%s</EndTime>\r\n"
+             "<Secrecy>0</Secrecy>\r\n"
+             "<Type>all</Type>\r\n"
+             "</Query>\r\n",
+             this->next_sn(), device, startTime, endTime);
+
+    int ret = eXosip_message_build_request(mSipCtx, &msg, "MESSAGE", to, from, nullptr);
+    if (ret != 0 || msg == nullptr) {
+        LOGE("eXosip_message_build_request RecordInfo error: ret=%d", ret);
+        return -1;
+    }
+
+    osip_message_set_body(msg, xml, strlen(xml));
+    osip_message_set_content_type(msg, "Application/MANSCDP+xml");
+
+    eXosip_lock(mSipCtx);
+    ret = eXosip_message_send_request(mSipCtx, msg);
+    eXosip_unlock(mSipCtx);
+
+    if (ret == 0) {
+        LOGI("RecordInfo query sent: device=%s, start=%s, end=%s", device, startTime, endTime);
+    } else {
+        LOGE("RecordInfo query send failed: device=%s, ret=%d", device, ret);
+    }
+
+    return ret;
+}
+
+void SipServer::enqueue_record_query(const char *device, const char *userIp, int userPort) {
+    if (device == nullptr || userIp == nullptr) {
+        return;
+    }
+
+    for (auto &query : mPendingRecordQueries) {
+        if (query.device == device) {
+            query.ip = userIp;
+            query.port = userPort;
+            query.executeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+            return;
+        }
+    }
+
+    PendingRecordQuery query;
+    query.device = device;
+    query.ip = userIp;
+    query.port = userPort;
+    query.executeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    mPendingRecordQueries.push_back(query);
+}
+
+void SipServer::process_pending_record_queries() {
+    while (!mPendingRecordQueries.empty()) {
+        PendingRecordQuery &query = mPendingRecordQueries.front();
+        if (std::chrono::steady_clock::now() < query.executeAt) {
+            break;
+        }
+
+        std::string startTime = this->build_record_query_time(true);
+        std::string endTime = this->build_record_query_time(false);
+        this->request_record_info(query.device.c_str(), query.ip.c_str(), query.port,
+                                  startTime.c_str(), endTime.c_str());
+        mPendingRecordQueries.pop_front();
+    }
+}
+
+std::string SipServer::build_record_query_time(bool startOfDay) const {
+    std::time_t now = std::time(nullptr);
+    std::tm timeInfo;
+#ifdef WIN32
+    localtime_s(&timeInfo, &now);
+#else
+    localtime_r(&now, &timeInfo);
+#endif
+
+    if (startOfDay) {
+        timeInfo.tm_hour = 0;
+        timeInfo.tm_min = 0;
+        timeInfo.tm_sec = 0;
+    }
+
+    char value[32] = {0};
+    std::strftime(value, sizeof(value), "%Y-%m-%dT%H:%M:%S", &timeInfo);
+    return value;
+}
+
+int SipServer::next_sn() {
+    return mSn.fetch_add(1);
+}
+
 int SipServer::clearClientMap(){
     std::map<std::string ,Client *>::iterator iter;
     for (iter=mClientMap.begin(); iter!=mClientMap.end(); iter++) {
@@ -404,6 +531,9 @@ Client * SipServer::getClientByDevice(const char *device) {
 }
 
 int SipServer::parse_xml(const char *data, const char *s_mark, bool with_s_make, const char *e_mark, bool with_e_make, char *dest) {
+    if (data == nullptr || s_mark == nullptr || e_mark == nullptr || dest == nullptr) {
+        return -1;
+    }
     const char* satrt = strstr( data, s_mark );
 
     if(satrt != NULL) {
